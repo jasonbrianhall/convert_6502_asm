@@ -53,11 +53,70 @@ private:
         return false;
     }
     
+    bool isDataDirective(const std::string& word) {
+        static const std::vector<std::string> dataDirectives = {
+            ".byte", ".db", ".word", ".dw", ".dbyte", ".addr", ".res", ".byt"
+        };
+        
+        for (const auto& dir : dataDirectives) {
+            if (word == dir) return true;
+        }
+        return false;
+    }
+    
     std::string trim(const std::string& str) {
         size_t start = str.find_first_not_of(" \t\r\n");
         if (start == std::string::npos) return "";
         size_t end = str.find_last_not_of(" \t\r\n");
         return str.substr(start, end - start + 1);
+    }
+    
+    std::vector<std::string> parseDataValues(const std::string& str) {
+        std::vector<std::string> values;
+        std::string current;
+        bool inQuotes = false;
+        bool escaped = false;
+        
+        for (size_t i = 0; i < str.length(); ++i) {
+            char c = str[i];
+            
+            if (escaped) {
+                current += c;
+                escaped = false;
+                continue;
+            }
+            
+            if (c == '\\' && inQuotes) {
+                current += c;
+                escaped = true;
+                continue;
+            }
+            
+            if (c == '"') {
+                current += c;
+                inQuotes = !inQuotes;
+                continue;
+            }
+            
+            if (c == ',' && !inQuotes) {
+                std::string trimmed = trim(current);
+                if (!trimmed.empty()) {
+                    values.push_back(trimmed);
+                }
+                current.clear();
+                continue;
+            }
+            
+            current += c;
+        }
+        
+        // Add the last value
+        std::string trimmed = trim(current);
+        if (!trimmed.empty()) {
+            values.push_back(trimmed);
+        }
+        
+        return values;
     }
     
     std::vector<std::string> split(const std::string& str, char delimiter) {
@@ -71,18 +130,62 @@ private:
     }
     
     std::string extractComment(const std::string& line) {
-        size_t commentPos = line.find(';');
-        if (commentPos != std::string::npos) {
-            return trim(line.substr(commentPos + 1));
+        bool inQuotes = false;
+        bool escaped = false;
+        
+        for (size_t i = 0; i < line.length(); ++i) {
+            char c = line[i];
+            
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            
+            if (c == '\\' && inQuotes) {
+                escaped = true;
+                continue;
+            }
+            
+            if (c == '"') {
+                inQuotes = !inQuotes;
+                continue;
+            }
+            
+            if (c == ';' && !inQuotes) {
+                return trim(line.substr(i + 1));
+            }
         }
+        
         return "";
     }
     
     std::string removeComment(const std::string& line) {
-        size_t commentPos = line.find(';');
-        if (commentPos != std::string::npos) {
-            return trim(line.substr(0, commentPos));
+        bool inQuotes = false;
+        bool escaped = false;
+        
+        for (size_t i = 0; i < line.length(); ++i) {
+            char c = line[i];
+            
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            
+            if (c == '\\' && inQuotes) {
+                escaped = true;
+                continue;
+            }
+            
+            if (c == '"') {
+                inQuotes = !inQuotes;
+                continue;
+            }
+            
+            if (c == ';' && !inQuotes) {
+                return trim(line.substr(0, i));
+            }
         }
+        
         return trim(line);
     }
     
@@ -109,33 +212,40 @@ private:
             return CONSTANT_DECL;
         }
         
-        // Check for data directives
-        if (cleanLine.substr(0, 3) == ".db") {
-            token.value = ".db";
-            std::string dataStr = trim(cleanLine.substr(3));
-            token.dataValues = split(dataStr, ',');
-            return DATA_BYTES;
-        }
-        
-        if (cleanLine.substr(0, 3) == ".dw") {
-            token.value = ".dw";
-            std::string dataStr = trim(cleanLine.substr(3));
-            token.dataValues = split(dataStr, ',');
-            return DATA_WORDS;
-        }
-        
-        // Check for other directives (start with .)
-        if (cleanLine[0] == '.') {
-            std::istringstream iss(cleanLine);
-            iss >> token.value >> token.operand;
-            return DIRECTIVE;
-        }
-        
-        // Check for instructions
+        // Parse first word to check directive type
         std::istringstream iss(cleanLine);
         std::string firstWord;
         iss >> firstWord;
         
+        // Check for data directives (more comprehensive)
+        if (isDataDirective(firstWord)) {
+            token.value = firstWord;
+            std::string rest;
+            std::getline(iss, rest);
+            rest = trim(rest);
+            
+            if (!rest.empty()) {
+                token.dataValues = parseDataValues(rest);
+            }
+            
+            // Determine if it's bytes or words
+            if (firstWord == ".word" || firstWord == ".dw" || firstWord == ".addr" || firstWord == ".dbyte") {
+                return DATA_WORDS;
+            } else {
+                return DATA_BYTES;
+            }
+        }
+        
+        // Check for other directives (start with .)
+        if (firstWord[0] == '.') {
+            token.value = firstWord;
+            std::string rest;
+            std::getline(iss, rest);
+            token.operand = trim(rest);
+            return DIRECTIVE;
+        }
+        
+        // Check for instructions
         if (isInstruction(firstWord)) {
             token.value = firstWord;
             std::string rest;
@@ -320,6 +430,12 @@ public:
                 json << "        \"content\": \"" << escapeJson(token.value);
                 if (!token.operand.empty()) {
                     json << " " << escapeJson(token.operand);
+                } else if (!token.dataValues.empty()) {
+                    json << " ";
+                    for (size_t i = 0; i < token.dataValues.size(); ++i) {
+                        if (i > 0) json << ", ";
+                        json << escapeJson(token.dataValues[i]);
+                    }
                 }
                 json << "\"";
                 
